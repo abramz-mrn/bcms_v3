@@ -1,0 +1,173 @@
+version: '3.8'
+
+services:
+  # Nginx reverse proxy
+  nginx:
+    image: nginx:1.28-alpine
+    container_name: bcms_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ../nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ../nginx/conf.d:/etc/nginx/conf.d:ro
+      - ../nginx/ssl:/etc/nginx/ssl:ro
+      - ../../apps/web/.next:/var/www/web/.next:ro
+    depends_on:
+      - web
+      - api
+    networks:
+      - bcms_network
+
+  # Next.js Frontend
+  web:
+    build:
+      context: ../../apps/web
+      dockerfile: Dockerfile.dev
+    container_name: bcms_web
+    ports:
+      - "3000:3000"
+    volumes:
+      - ../../apps/web:/app
+      - /app/node_modules
+      - /app/.next
+    environment:
+      - NODE_ENV=development
+      - NEXT_PUBLIC_API_URL=http://nginx/api
+    networks:
+      - bcms_network
+    command: npm run dev
+
+  # Laravel Backend
+  api:
+    build:
+      context: ../../apps/api
+      dockerfile: Dockerfile.dev
+    container_name: bcms_api
+    ports:
+      - "9000:9000"
+      - "8000:8000"
+    volumes:
+      - ../../apps/api:/var/www/html
+      - /var/www/html/vendor
+    environment:
+      - APP_ENV=local
+      - APP_DEBUG=true
+      - DB_CONNECTION=pgsql
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_DATABASE=bcms
+      - DB_USERNAME=bcms_user
+      - DB_PASSWORD=bcms_password
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CACHE_DRIVER=redis
+      - QUEUE_CONNECTION=redis
+      - SESSION_DRIVER=redis
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - bcms_network
+
+  # Laravel Horizon (Queue Worker)
+  horizon:
+    build:
+      context: ../../apps/api
+      dockerfile: Dockerfile.dev
+    container_name: bcms_horizon
+    volumes:
+      - ../../apps/api:/var/www/html
+      - /var/www/html/vendor
+    environment:
+      - APP_ENV=local
+      - APP_DEBUG=true
+      - DB_CONNECTION=pgsql
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_DATABASE=bcms
+      - DB_USERNAME=bcms_user
+      - DB_PASSWORD=bcms_password
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - QUEUE_CONNECTION=redis
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - bcms_network
+    command: php artisan horizon
+
+  # Laravel Scheduler
+  scheduler:
+    build:
+      context: ../../apps/api
+      dockerfile: Dockerfile.dev
+    container_name: bcms_scheduler
+    volumes:
+      - ../../apps/api:/var/www/html
+      - /var/www/html/vendor
+    environment:
+      - APP_ENV=local
+      - DB_CONNECTION=pgsql
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_DATABASE=bcms
+      - DB_USERNAME=bcms_user
+      - DB_PASSWORD=bcms_password
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - bcms_network
+    command: sh -c "while true; do php artisan schedule:run --verbose --no-interaction & sleep 60; done"
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:18-alpine
+    container_name: bcms_postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=bcms
+      - POSTGRES_USER=bcms_user
+      - POSTGRES_PASSWORD=bcms_password
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - bcms_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bcms_user -d bcms"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for caching and queues
+  redis:
+    image: redis:8-alpine
+    container_name: bcms_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - bcms_network
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  bcms_network:
+    driver: bridge
